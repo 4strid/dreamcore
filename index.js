@@ -1,6 +1,6 @@
 const url = require('url')
 const $RouteParam = Symbol('RouteParam')
-const $Param = Symbol('Param')
+const $ParamName = Symbol('Param')
 const $Handlers = Symbol('Handlers')
 
 function App () {
@@ -9,46 +9,54 @@ function App () {
   this.handler = this.handler.bind(this)
 }
 
-App.prototype.addRoute = function (method, path, handler) {
-  const segments = path.split('/').filter(Boolean)
-  let route = this.routes
+function traverseTree (tree, segments, method, params = {}) {
+  if (segments.length === 0 && tree[$Handlers] && tree[$Handlers][method]) {
+    return tree[$Handlers][method]
+  }
+  const leg = segments[0]
+  if (tree[leg]) {
+    return traverseTree(tree[leg], segments.slice(1), method, params)
+  }
+  if (tree[$RouteParam]) {
+    const paramName = tree[$ParamName]
+    params[paramName] = leg
+    return traverseTree(tree[$RouteParam], segments.slice(1), method, params)
+  }
+  return null
+}
 
-  segments.forEach((segment, index) => {
-    const isLastSegment = index === segments.length - 1
-    const leg = segment.startsWith(':') ? $RouteParam : segment
-
-    if (!route[leg]) {
-      route[leg] = {}
-    }
-
-    if (leg === $RouteParam) {
-      route[leg][$Param] = segment.substring(1)
-    }
-
-    if (isLastSegment) {
-      if (leg === $RouteParam) {
-                // Check for existing siblings with handlers
-        for (const key in route) {
-          if (route[key][$Handlers]) {
-            throw new Error(`Ambiguous route: cannot combine dynamic segment '${segments[index]}' with existing static routes under '${segments.slice(0, index).join('/')}'`)
-          }
-        }
-      } else if (route[$RouteParam] && route[$RouteParam][$Handlers]) {
-                // Check for existing dynamic route in the parent
-        throw new Error(`Ambiguous route: cannot combine static segment '${segment}' with existing dynamic route under '${segments.slice(0, index).join('/')}'`)
+function buildTree (tree, segments, method, handler) {
+  if (segments.length === 0) {
+    tree[$Handlers] = tree[$Handlers] || {}
+    tree[$Handlers][method] = handler
+  }
+  const leg = segments[0]
+  if (leg.startsWith(':')) {
+    for (let branch in tree) {
+      if (typeof branch === 'string' || branch instanceof String) {
+        throw new Error(`Ambiguous route: cannot add dynamic route ${leg} where ${branch} already exists`)
       }
-
-      if (!route[leg][$Handlers]) {
-        route[leg][$Handlers] = {}
-      }
-      if (route[leg][$Handlers][method]) {
-        throw new Error(`Route for ${path} already defined`)
-      }
-      route[leg][$Handlers][method] = handler
-    } else {
-      route = route[leg]
     }
-  })
+    tree[$RouteParam] = tree[$RouteParam] || {}
+    tree[$ParamName] = leg.slice(1)
+    buildTree(tree[$RouteParam], segments.slice(1), method, handler)
+  } else {
+    if (tree[$RouteParam]) {
+      throw new Error(`Ambiguous route: cannot add static route where dynamic route segment :${tree[$ParamName]} already exists`)
+    }   
+    tree[leg] = tree[leg] || {}
+    buildTree(tree[leg], segments.slice(1), method, handler)
+  }
+}
+
+App.prototype.addRoute = function (path, method, handler) {
+  const segments = path.split('/').slice(1)
+
+  const match = traverseTree(this.route, segments, method)
+  if (match) {
+    throw new Error(`Ambiguous route: ${path} already defined`)
+  }
+  buildTree(this.routes, segments, method, handler)
   console.log(this.routes)
 }
 
@@ -60,7 +68,7 @@ const methods = ['get', 'post', 'put', 'patch', 'delete', 'head']
 
 for (const method of methods) {
   App.prototype[method] = function (path, handler) {
-    this.addRoute(method.toUpperCase(), path, handler)
+    this.addRoute(path, method.toUpperCase(), handler)
   }
 }
 
@@ -78,7 +86,7 @@ App.prototype.handler = function (req, res) {
 
   promiseChain
     .then(() => {
-      const segments = req.url.split('/').filter(Boolean)
+      const segments = req.url.split('/').slice(1)
       let route = this.routes
       const params = {}
 
@@ -86,7 +94,7 @@ App.prototype.handler = function (req, res) {
         if (segment in route) {
           route = route[segment]
         } else if ($RouteParam in route) {
-          params[route[$RouteParam][$Param]] = segment
+          params[route[$RouteParam][$ParamName]] = segment
           route = route[$RouteParam]
         } else {
           res.writeHead(404)
